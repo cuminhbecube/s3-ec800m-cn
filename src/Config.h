@@ -16,8 +16,15 @@
 
 // --- Network & JT808 Settings ---
 #define APN "v-internet"
-#define SERVER_IP "your-server.com"
-#define SERVER_PORT 5015
+
+extern String app_wifi_ssid;
+extern String app_wifi_pass;
+extern String app_server_ip;
+extern int app_server_port;
+extern int app_report_interval;
+
+void loadConfig();
+void saveConfig();
 
 #define DEFAULT_LAT 21.03678847235882
 #define DEFAULT_LON 105.83467128147198

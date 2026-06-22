@@ -306,6 +306,7 @@ void modem_loop() {
   // --- Vòng lặp chính sau khi khởi tạo thành công ---
   static unsigned long last_state_check = 0;
   static bool is_ready_to_send = false;
+  static int sim_err_cnt = 0;
 
   // Tránh spam AT commands gây treo thiết bị, chỉ kiểm tra định kỳ mỗi 5s
   if (now - last_state_check >= 5000) {
@@ -313,28 +314,39 @@ void modem_loop() {
 
       if (modem.isTCPConnected()) {
           is_ready_to_send = true;
+          sim_err_cnt = 0;
           // TCP đã kết nối thì bỏ qua việc check CPIN, CREG, QIACT liên tục để tối ưu luồng AT
       } else {
           is_ready_to_send = false;
           if (!modem.isSimReady()) {
               currentState = STATE_NO_SIM;
               Serial.println("SIM chưa sẵn sàng!");
-          } else if (!modem.isNetworkConnected()) {
-              currentState = STATE_NO_NETWORK;
-              Serial.println("Mất sóng mạng...");
-          } else if (!modem.isGPRSConnected()) {
-              currentState = STATE_NO_INTERNET;
-              Serial.println("Mất GPRS, đang kết nối lại...");
-              modem.activateGPRS();
+              sim_err_cnt++;
+              if (sim_err_cnt >= 2) {
+                  Serial.println("Phát hiện lỗi SIM (rút sim/lỏng sim), tiến hành Reset Modem...");
+                  sim_err_cnt = 0;
+                  init_step = 0;
+                  return;
+              }
           } else {
-              currentState = STATE_NO_INTERNET;
-              Serial.printf("Kết nối TCP tới %s:%d...\n", SERVER_IP, SERVER_PORT);
-              if (modem.connectTCP(SERVER_IP, SERVER_PORT)) {
-                  Serial.println("Kết nối thành công! Gửi gói Auth.");
-                  sendAuth(); 
-                  is_ready_to_send = true;
+              sim_err_cnt = 0;
+              if (!modem.isNetworkConnected()) {
+                  currentState = STATE_NO_NETWORK;
+                  Serial.println("Mất sóng mạng...");
+              } else if (!modem.isGPRSConnected()) {
+                  currentState = STATE_NO_INTERNET;
+                  Serial.println("Mất GPRS, đang kết nối lại...");
+                  modem.activateGPRS();
               } else {
-                  Serial.println("Kết nối thất bại.");
+                  currentState = STATE_NO_INTERNET;
+                  Serial.printf("Kết nối TCP tới %s:%d...\n", app_server_ip.c_str(), app_server_port);
+                  if (modem.connectTCP(app_server_ip, app_server_port)) {
+                      Serial.println("Kết nối thành công! Gửi gói Auth.");
+                      sendAuth(); 
+                      is_ready_to_send = true;
+                  } else {
+                      Serial.println("Kết nối thất bại.");
+                  }
               }
           }
       }
@@ -368,8 +380,12 @@ void modem_loop() {
   if (!is_ready_to_send) return;
 
   // Gửi Location định kỳ
-  if (now - lastSend > 10000) {
+  if (now - lastSend > (unsigned long)app_report_interval * 1000) {
     lastSend = now;
+
+    // Lấy chuỗi GNRMC để hiển thị log theo yêu cầu của user
+    modem.sendAT("AT+QGPSGNMEA=\"RMC\"");
+    modem.waitResponse(500);
 
     double lat = 0.0, lon = 0.0;
     bool hasGPS = modem.getGPSLocation(lat, lon);

@@ -16,8 +16,8 @@ Dự án thiết bị định vị GPS 4G dành cho ô tô/xe máy, sử dụng 
    - Thiết bị ưu tiên lấy thời gian cực kỳ chính xác từ Vệ Tinh (GNSS/RMC).
    - Trong trường hợp xe đậu trong tầng hầm mất sóng vệ tinh, thiết bị sẽ tự động dò và đồng bộ thời gian từ mạng di động qua **NTP** (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`) để đảm bảo không bao giờ bị sai ngày giờ gửi lên server.
 
-3. **Web Dashboard Tích Hợp (Offline):**
-   - Thiết bị tự động phát Wi-Fi Access Point mang tên `S3_GPS_Tracker`.
+1. **Web Dashboard Trực Quan & Cấu Hình Từ Xa (NVS):**
+   - Thiết bị tự động phát Wi-Fi Access Point mang tên `S3_GPS_Tracker` (Mật khẩu mặc định: `s3gpspassword`).
    - Giao diện Web siêu hiện đại (UI Glassmorphism, Dark mode, No-scroll mobile first).
    - Truy cập qua địa chỉ: **http://192.168.4.1** để giám sát trực tiếp:
      - Tọa độ GPS (Lat/Lon) thực tế.
@@ -25,6 +25,7 @@ Dự án thiết bị định vị GPS 4G dành cho ô tô/xe máy, sử dụng 
      - Trạng thái kết nối (Khởi tạo, Lỗi SIM, Dò sóng, Online).
      - ID Thiết bị, Mã IMEI (Modem) & CCID (Simcard).
      - Bộ nhớ RAM khả dụng (Free Heap) theo thời gian thực (1s/lần).
+   - **Tính năng Cài Đặt Từ Xa:** Cho phép thay đổi ngay lập tức **Server IP, Server Port, Chu Kỳ Truyền (giây), Tên WiFi (SSID) và Mật Khẩu WiFi** trực tiếp qua Web. Dữ liệu được lưu trữ cứng vào bộ nhớ Flash NVS của ESP32 để không bao giờ bị mất khi khởi động lại.
 
 4. **Chỉ Báo Bằng Đèn NeoPixel (WS2812B):**
    - **Xanh dương nhấp nháy:** Đang khởi tạo thiết bị.
@@ -32,9 +33,10 @@ Dự án thiết bị định vị GPS 4G dành cho ô tô/xe máy, sử dụng 
    - **Vàng:** Không có tọa độ GPS hợp lệ (đang dò hoặc mất sóng GPS).
    - **Xanh lá:** Hoạt động hoàn hảo (Đã có GPS thật và nối mạng thành công).
 
-5. **Trình điều khiển Module Custom (EC800Client):**
+5. **Trình điều khiển Module Custom (EC800Client) & Tự Động Phục Hồi:**
    - Không sử dụng các thư viện ngoài bị lỗi bộ đệm UART như `TinyGsmClient`. Dự án sử dụng bộ **Protocol EC800Client** được viết riêng 100% từ đầu để giao tiếp AT Command với module EC800M-CN.
    - **Tối ưu hóa Vòng lặp:** Hệ thống sẽ tự động vô hiệu hóa các lệnh kiểm tra phần cứng (SIM, Sóng, GPRS) nếu luồng TCP đã được thiết lập thành công. Chỉ khi TCP rớt mạch mới tiến hành kiểm tra lại, loại bỏ hoàn toàn các lệnh AT thừa thãi, tiết kiệm tài nguyên vi xử lý.
+   - **Hotplug Fallback:** Tích hợp cơ chế theo dõi SIM liên tục. Nếu rút khay SIM khi đang chạy hoặc mất kết nối thẻ SIM phần cứng, ESP32 sẽ tự động nhận diện sau vài giây, sau đó ép module Hard-Reset (chân PWRKEY/RST) để khởi động và kết nối lại hoàn toàn tự động khi SIM được lắp lại mà không gây "treo" hệ thống.
 
 6. **Quản Lý Bằng FreeRTOS:**
    - Hoạt động đa luồng không giật lag. Vòng lặp giao tiếp Modem 4G (AT commands) hoàn toàn tách biệt với vòng lặp phản hồi Web Server thông qua FreeRTOS Task.

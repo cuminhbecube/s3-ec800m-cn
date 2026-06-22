@@ -5,8 +5,6 @@
 
 WebServer* server;
 
-const char* ssid = "S3_GPS_Tracker";
-
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="vi">
@@ -23,20 +21,21 @@ const char index_html[] PROGMEM = R"rawliteral(
             font-family: 'Inter', sans-serif;
             background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
             color: #e2e8f0;
-            height: 100vh;
-            overflow: hidden;
+            min-height: 100vh;
+            overflow-y: auto;
+            overflow-x: hidden;
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             padding: 20px;
         }
 
         .dashboard {
             width: 100%;
             max-width: 450px;
-            height: 100%;
-            max-height: 800px;
+            height: auto;
+            margin: auto;
             background: rgba(255, 255, 255, 0.03);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 24px;
@@ -47,13 +46,29 @@ const char index_html[] PROGMEM = R"rawliteral(
             flex-direction: column;
             gap: 25px;
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            position: relative;
         }
 
-        .header {
-            text-align: center;
-            margin-bottom: 10px;
+        .settings-btn {
+            position: absolute;
+            top: 25px;
+            right: 25px;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: white;
+            border-radius: 50%;
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 18px;
+            transition: background 0.3s;
         }
+        .settings-btn:hover { background: rgba(255, 255, 255, 0.2); }
 
+        .header { text-align: center; margin-bottom: 10px; }
         .header h1 {
             font-size: 24px;
             font-weight: 800;
@@ -62,11 +77,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             -webkit-text-fill-color: transparent;
             margin-bottom: 5px;
         }
-
-        .header p {
-            font-size: 13px;
-            color: #94a3b8;
-        }
+        .header p { font-size: 13px; color: #94a3b8; }
 
         .status-badge {
             align-self: center;
@@ -79,17 +90,11 @@ const char index_html[] PROGMEM = R"rawliteral(
             gap: 8px;
             transition: all 0.3s ease;
         }
-
         .status-badge.online { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
         .status-badge.error { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
         .status-badge.warning { background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
 
-        .indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-        }
-
+        .indicator { width: 10px; height: 10px; border-radius: 50%; }
         .status-badge.online .indicator { background: #4ade80; box-shadow: 0 0 10px #4ade80; }
         .status-badge.error .indicator { background: #f87171; box-shadow: 0 0 10px #f87171; }
         .status-badge.warning .indicator { background: #facc15; box-shadow: 0 0 10px #facc15; }
@@ -110,50 +115,62 @@ const char index_html[] PROGMEM = R"rawliteral(
             flex-direction: column;
             justify-content: center;
             gap: 8px;
-            transition: transform 0.2s;
         }
+        .card-icon { font-size: 24px; margin-bottom: 5px; }
+        .card-title { font-size: 12px; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .card-value { font-size: 16px; font-weight: 600; word-break: break-all; line-height: 1.3; }
+        .card.full-width { grid-column: span 2; }
+        .value-highlight { color: #38bdf8; }
 
-        .card:active { transform: scale(0.96); }
-
-        .card-icon {
-            font-size: 24px;
-            margin-bottom: 5px;
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.7);
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
         }
-
-        .card-title {
-            font-size: 12px;
-            color: #94a3b8;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+        .modal-content {
+            background: #1e293b;
+            border-radius: 20px;
+            padding: 25px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
         }
-
-        .card-value {
+        .modal-content h2 { margin-bottom: 10px; font-size: 20px; text-align: center; }
+        .modal-content label { font-size: 13px; color: #94a3b8; font-weight: 600; margin-bottom: -10px; }
+        .modal-content input {
+            background: rgba(0,0,0,0.2);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
             font-size: 16px;
-            font-weight: 600;
-            word-break: break-all;
-            line-height: 1.3;
+            width: 100%;
         }
-
-        .card.full-width {
-            grid-column: span 2;
+        .modal-buttons { display: flex; gap: 10px; margin-top: 10px; }
+        .modal-buttons button {
+            flex: 1; padding: 12px;
+            border: none; border-radius: 8px;
+            font-size: 14px; font-weight: 600;
+            cursor: pointer; color: white;
         }
+        .btn-save { background: #3b82f6; }
+        .btn-cancel { background: #475569; }
 
-        .value-highlight {
-            color: #38bdf8;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .loading { animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
     </style>
 </head>
 <body>
 
 <div class="dashboard">
+    <button class="settings-btn" onclick="openSettings()">⚙️</button>
     <div class="header">
         <h1>S3 GPS Tracker</h1>
         <p>Live Device Telemetry</p>
@@ -204,6 +221,26 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
 </div>
 
+<div id="settings-modal" class="modal">
+    <div class="modal-content">
+        <h2>Cài Đặt Thiết Bị</h2>
+        <label>Tên WiFi (SSID)</label>
+        <input type="text" id="cfg-ssid">
+        <label>Mật Khẩu WiFi</label>
+        <input type="text" id="cfg-pass">
+        <label>Server IP / Domain</label>
+        <input type="text" id="cfg-ip">
+        <label>Server Port</label>
+        <input type="number" id="cfg-port">
+        <label>Chu Kỳ Truyền (Giây)</label>
+        <input type="number" id="cfg-interval">
+        <div class="modal-buttons">
+            <button class="btn-cancel" onclick="closeSettings()">Hủy</button>
+            <button class="btn-save" onclick="saveSettings()">Lưu & Khởi Động Lại</button>
+        </div>
+    </div>
+</div>
+
 <script>
     const states = [
         "Khởi tạo", 
@@ -214,6 +251,13 @@ const char index_html[] PROGMEM = R"rawliteral(
         "Đang dò GPS...", 
         "Hoạt động bình thường"
     ];
+
+    let updateTimer = null;
+
+    function startDashboard() {
+        updateTimer = setInterval(updateDashboard, 1000);
+        updateDashboard();
+    }
 
     function updateDashboard() {
         fetch('/api/status')
@@ -235,12 +279,12 @@ const char index_html[] PROGMEM = R"rawliteral(
                 textSpan.innerText = stateText;
                 
                 badge.className = "status-badge";
-                if (stateCode === 6) { // HAS_GPS
+                if (stateCode === 6) { 
                     badge.classList.add('online');
-                } else if (stateCode >= 2 && stateCode <= 4) { // Lỗi SIM, mạng
+                } else if (stateCode >= 2 && stateCode <= 4) { 
                     badge.classList.add('error');
                 } else {
-                    badge.classList.add('warning'); // Đang khởi tạo, dò GPS
+                    badge.classList.add('warning'); 
                 }
             })
             .catch(err => {
@@ -249,8 +293,53 @@ const char index_html[] PROGMEM = R"rawliteral(
             });
     }
 
-    setInterval(updateDashboard, 1000);
-    updateDashboard();
+    function openSettings() {
+        clearInterval(updateTimer); // Stop refreshing status while in settings
+        document.getElementById('settings-modal').style.display = 'flex';
+        fetch('/api/config')
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('cfg-ssid').value = data.ssid || "";
+                document.getElementById('cfg-pass').value = data.pass || "";
+                document.getElementById('cfg-ip').value = data.ip;
+                document.getElementById('cfg-port').value = data.port;
+                document.getElementById('cfg-interval').value = data.interval;
+            });
+    }
+
+    function closeSettings() {
+        document.getElementById('settings-modal').style.display = 'none';
+        startDashboard(); // Resume
+    }
+
+    function saveSettings() {
+        const ssid = document.getElementById('cfg-ssid').value;
+        const pass = document.getElementById('cfg-pass').value;
+        const ip = document.getElementById('cfg-ip').value;
+        const port = document.getElementById('cfg-port').value;
+        const interval = document.getElementById('cfg-interval').value;
+        
+        const params = new URLSearchParams();
+        params.append('ssid', ssid);
+        params.append('pass', pass);
+        params.append('ip', ip);
+        params.append('port', port);
+        params.append('interval', interval);
+
+        fetch('/api/save', {
+            method: 'POST',
+            body: params
+        }).then(() => {
+            alert("Cấu hình đã lưu! Thiết bị sẽ khởi động lại để áp dụng mạng.");
+            closeSettings();
+            // Optional: reload the page after a few seconds
+            setTimeout(() => location.reload(), 3000);
+        }).catch(() => {
+            alert("Lưu cấu hình thất bại.");
+        });
+    }
+
+    startDashboard();
 </script>
 
 </body>
@@ -276,15 +365,53 @@ void handleApiStatus() {
     server->send(200, "application/json", json);
 }
 
+void handleApiGetConfig() {
+    String json = "{";
+    json += "\"ssid\":\"" + app_wifi_ssid + "\",";
+    json += "\"pass\":\"" + app_wifi_pass + "\",";
+    json += "\"ip\":\"" + app_server_ip + "\",";
+    json += "\"port\":" + String(app_server_port) + ",";
+    json += "\"interval\":" + String(app_report_interval);
+    json += "}";
+    server->send(200, "application/json", json);
+}
+
+void handleApiSaveConfig() {
+    if (server->hasArg("ssid")) {
+        app_wifi_ssid = server->arg("ssid");
+    }
+    if (server->hasArg("pass")) {
+        app_wifi_pass = server->arg("pass");
+    }
+    if (server->hasArg("ip")) {
+        app_server_ip = server->arg("ip");
+    }
+    if (server->hasArg("port")) {
+        app_server_port = server->arg("port").toInt();
+    }
+    if (server->hasArg("interval")) {
+        app_report_interval = server->arg("interval").toInt();
+    }
+    
+    saveConfig();
+    server->send(200, "text/plain", "OK");
+    
+    // Reboot to apply new settings and restart modem connection cleanly
+    delay(1000);
+    ESP.restart();
+}
+
 void web_init() {
     server = new WebServer(80);
-    WiFi.softAP(ssid);
+    WiFi.softAP(app_wifi_ssid.c_str(), app_wifi_pass.c_str());
     IPAddress IP = WiFi.softAPIP();
     Serial.print("\n-I-AP IP address: ");
     Serial.println(IP);
     
-    server->on("/", handleRoot);
-    server->on("/api/status", handleApiStatus);
+    server->on("/", HTTP_GET, handleRoot);
+    server->on("/api/status", HTTP_GET, handleApiStatus);
+    server->on("/api/config", HTTP_GET, handleApiGetConfig);
+    server->on("/api/save", HTTP_POST, handleApiSaveConfig);
     server->begin();
     Serial.println("-I-HTTP server started");
 }

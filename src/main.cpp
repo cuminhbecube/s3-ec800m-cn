@@ -17,10 +17,13 @@ void webTaskFunc(void *pvParameters) {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0); // Ngăn ESP32-S3 treo/reset khi rút cáp USB COM port
   vTaskDelay(2000 / portTICK_PERIOD_MS);
   Serial.println();
   Serial.println("-I-Flash OK: EF4018");
   Serial.printf("-Os heap free:%d\n", ESP.getFreeHeap());
+
+  loadConfig();
 
   indicator_init();
   web_init();
