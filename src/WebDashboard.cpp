@@ -1,423 +1,334 @@
 #include "WebDashboard.h"
-#include <WiFi.h>
-#include <WebServer.h>
-#include "Config.h"
+#include "WebHTML.h"
+#include <ArduinoJson.h>
+#include <Update.h>
 
-WebServer* server;
+WebDashboard::WebDashboard(ConfigManager& config, FingerprintManager& fingerprint)
+    : _server(80), _config(config), _fingerprint(fingerprint) {}
 
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>GPS Tracker Dashboard</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-        
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        
-        body {
-            font-family: 'Inter', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #e2e8f0;
-            min-height: 100vh;
-            overflow-y: auto;
-            overflow-x: hidden;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: flex-start;
-            padding: 20px;
-        }
+void WebDashboard::begin() {
+    Serial.println("Starting WiFi AP...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(state.apSSID.c_str(), state.apPass.c_str());
+    
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
 
-        .dashboard {
-            width: 100%;
-            max-width: 450px;
-            height: auto;
-            margin: auto;
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            padding: 30px 25px;
-            display: flex;
-            flex-direction: column;
-            gap: 25px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            position: relative;
-        }
-
-        .settings-btn {
-            position: absolute;
-            top: 25px;
-            right: 25px;
-            background: rgba(255, 255, 255, 0.1);
-            border: none;
-            color: white;
-            border-radius: 50%;
-            width: 36px;
-            height: 36px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            font-size: 18px;
-            transition: background 0.3s;
-        }
-        .settings-btn:hover { background: rgba(255, 255, 255, 0.2); }
-
-        .header { text-align: center; margin-bottom: 10px; }
-        .header h1 {
-            font-size: 24px;
-            font-weight: 800;
-            background: linear-gradient(to right, #38bdf8, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 5px;
-        }
-        .header p { font-size: 13px; color: #94a3b8; }
-
-        .status-badge {
-            align-self: center;
-            padding: 8px 20px;
-            border-radius: 50px;
-            font-size: 14px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            transition: all 0.3s ease;
-        }
-        .status-badge.online { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
-        .status-badge.error { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .status-badge.warning { background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); }
-
-        .indicator { width: 10px; height: 10px; border-radius: 50%; }
-        .status-badge.online .indicator { background: #4ade80; box-shadow: 0 0 10px #4ade80; }
-        .status-badge.error .indicator { background: #f87171; box-shadow: 0 0 10px #f87171; }
-        .status-badge.warning .indicator { background: #facc15; box-shadow: 0 0 10px #facc15; }
-
-        .card-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            flex-grow: 1;
-        }
-
-        .card {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 16px;
-            padding: 20px 15px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            gap: 8px;
-        }
-        .card-icon { font-size: 24px; margin-bottom: 5px; }
-        .card-title { font-size: 12px; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-        .card-value { font-size: 16px; font-weight: 600; word-break: break-all; line-height: 1.3; }
-        .card.full-width { grid-column: span 2; }
-        .value-highlight { color: #38bdf8; }
-
-        /* Modal Styles */
-        .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0; top: 0; width: 100%; height: 100%;
-            background-color: rgba(0,0,0,0.7);
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-        .modal-content {
-            background: #1e293b;
-            border-radius: 20px;
-            padding: 25px;
-            width: 100%;
-            max-width: 400px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        .modal-content h2 { margin-bottom: 10px; font-size: 20px; text-align: center; }
-        .modal-content label { font-size: 13px; color: #94a3b8; font-weight: 600; margin-bottom: -10px; }
-        .modal-content input {
-            background: rgba(0,0,0,0.2);
-            border: 1px solid rgba(255,255,255,0.1);
-            color: white;
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 16px;
-            width: 100%;
-        }
-        .modal-buttons { display: flex; gap: 10px; margin-top: 10px; }
-        .modal-buttons button {
-            flex: 1; padding: 12px;
-            border: none; border-radius: 8px;
-            font-size: 14px; font-weight: 600;
-            cursor: pointer; color: white;
-        }
-        .btn-save { background: #3b82f6; }
-        .btn-cancel { background: #475569; }
-
-    </style>
-</head>
-<body>
-
-<div class="dashboard">
-    <button class="settings-btn" onclick="openSettings()">⚙️</button>
-    <div class="header">
-        <h1>S3 GPS Tracker</h1>
-        <p>Live Device Telemetry</p>
-    </div>
-
-    <div id="main-status" class="status-badge warning">
-        <div class="indicator"></div>
-        <span id="state-text">Đang kết nối...</span>
-    </div>
-
-    <div class="card-grid">
-        <div class="card full-width">
-            <div class="card-title">Thiết bị ID (JT808)</div>
-            <div class="card-value value-highlight" id="val-tid">Đang tải...</div>
-        </div>
-        
-        <div class="card">
-            <div class="card-icon">📡</div>
-            <div class="card-title">Tọa độ Lat</div>
-            <div class="card-value" id="val-lat">0.000000</div>
-        </div>
-
-        <div class="card">
-            <div class="card-icon">🌍</div>
-            <div class="card-title">Tọa độ Lon</div>
-            <div class="card-value" id="val-lon">0.000000</div>
-        </div>
-
-        <div class="card full-width">
-            <div class="card-title">IMEI Module</div>
-            <div class="card-value" id="val-imei">Đang tải...</div>
-        </div>
-
-        <div class="card full-width">
-            <div class="card-title">SIM CCID</div>
-            <div class="card-value" id="val-ccid" style="font-size: 13px;">Đang tải...</div>
-        </div>
-
-        <div class="card full-width" style="flex-direction: row; justify-content: space-between; align-items: center;">
-            <div class="card-title">Device Time</div>
-            <div class="card-value" id="val-time" style="color: #facc15; font-size: 14px;">Đang tải...</div>
-        </div>
-
-        <div class="card full-width" style="flex-direction: row; justify-content: space-between; align-items: center;">
-            <div class="card-title">Free Heap</div>
-            <div class="card-value" id="val-heap" style="color: #4ade80;">0 KB</div>
-        </div>
-    </div>
-</div>
-
-<div id="settings-modal" class="modal">
-    <div class="modal-content">
-        <h2>Cài Đặt Thiết Bị</h2>
-        <label>Tên WiFi (SSID)</label>
-        <input type="text" id="cfg-ssid">
-        <label>Mật Khẩu WiFi</label>
-        <input type="text" id="cfg-pass">
-        <label>Server IP / Domain</label>
-        <input type="text" id="cfg-ip">
-        <label>Server Port</label>
-        <input type="number" id="cfg-port">
-        <label>Chu Kỳ Truyền (Giây)</label>
-        <input type="number" id="cfg-interval">
-        <div class="modal-buttons">
-            <button class="btn-cancel" onclick="closeSettings()">Hủy</button>
-            <button class="btn-save" onclick="saveSettings()">Lưu & Khởi Động Lại</button>
-        </div>
-    </div>
-</div>
-
-<script>
-    const states = [
-        "Khởi tạo", 
-        "Phát nhạc khởi động", 
-        "Lỗi: Không nhận SIM", 
-        "Lỗi: Không có sóng", 
-        "Lỗi: Không có 4G/GPRS", 
-        "Đang dò GPS...", 
-        "Hoạt động bình thường"
-    ];
-
-    let updateTimer = null;
-
-    function startDashboard() {
-        updateTimer = setInterval(updateDashboard, 1000);
-        updateDashboard();
-    }
-
-    function updateDashboard() {
-        fetch('/api/status')
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('val-tid').innerText = data.terminal_id || "N/A";
-                document.getElementById('val-imei').innerText = data.imei || "N/A";
-                document.getElementById('val-ccid').innerText = data.ccid || "N/A";
-                document.getElementById('val-lat').innerText = data.lat.toFixed(6);
-                document.getElementById('val-lon').innerText = data.lon.toFixed(6);
-                document.getElementById('val-time').innerText = data.time || "N/A";
-                document.getElementById('val-heap').innerText = (data.heap / 1024).toFixed(1) + " KB";
-                
-                const stateCode = data.state;
-                const stateText = states[stateCode] || "Không xác định";
-                const badge = document.getElementById('main-status');
-                const textSpan = document.getElementById('state-text');
-                
-                textSpan.innerText = stateText;
-                
-                badge.className = "status-badge";
-                if (stateCode === 6) { 
-                    badge.classList.add('online');
-                } else if (stateCode >= 2 && stateCode <= 4) { 
-                    badge.classList.add('error');
-                } else {
-                    badge.classList.add('warning'); 
-                }
-            })
-            .catch(err => {
-                document.getElementById('state-text').innerText = "Mất kết nối với thiết bị";
-                document.getElementById('main-status').className = "status-badge error";
-            });
-    }
-
-    function openSettings() {
-        clearInterval(updateTimer); // Stop refreshing status while in settings
-        document.getElementById('settings-modal').style.display = 'flex';
-        fetch('/api/config')
-            .then(res => res.json())
-            .then(data => {
-                document.getElementById('cfg-ssid').value = data.ssid || "";
-                document.getElementById('cfg-pass').value = data.pass || "";
-                document.getElementById('cfg-ip').value = data.ip;
-                document.getElementById('cfg-port').value = data.port;
-                document.getElementById('cfg-interval').value = data.interval;
-            });
-    }
-
-    function closeSettings() {
-        document.getElementById('settings-modal').style.display = 'none';
-        startDashboard(); // Resume
-    }
-
-    function saveSettings() {
-        const ssid = document.getElementById('cfg-ssid').value;
-        const pass = document.getElementById('cfg-pass').value;
-        const ip = document.getElementById('cfg-ip').value;
-        const port = document.getElementById('cfg-port').value;
-        const interval = document.getElementById('cfg-interval').value;
-        
-        const params = new URLSearchParams();
-        params.append('ssid', ssid);
-        params.append('pass', pass);
-        params.append('ip', ip);
-        params.append('port', port);
-        params.append('interval', interval);
-
-        fetch('/api/save', {
-            method: 'POST',
-            body: params
-        }).then(() => {
-            alert("Cấu hình đã lưu! Thiết bị sẽ khởi động lại để áp dụng mạng.");
-            closeSettings();
-            // Optional: reload the page after a few seconds
-            setTimeout(() => location.reload(), 3000);
-        }).catch(() => {
-            alert("Lưu cấu hình thất bại.");
-        });
-    }
-
-    startDashboard();
-</script>
-
-</body>
-</html>
-)rawliteral";
-
-void handleRoot() {
-    server->send(200, "text/html", index_html);
+    _server.on("/", HTTP_GET, std::bind(&WebDashboard::handleRoot, this));
+    _server.on("/api/status", HTTP_GET, std::bind(&WebDashboard::handleApiStatus, this));
+    
+    // s3gps uses /api/config for GET and /api/save for POST
+    _server.on("/api/config", HTTP_GET, std::bind(&WebDashboard::handleApiConfigGet, this));
+    _server.on("/api/save", HTTP_POST, std::bind(&WebDashboard::handleApiConfigPost, this));
+    _server.on("/api/config", HTTP_POST, std::bind(&WebDashboard::handleApiConfigPost, this)); // Fallback
+    
+    _server.on("/api/toggle_alarm", HTTP_POST, std::bind(&WebDashboard::handleApiToggleAlarm, this));
+    _server.on("/api/logs", HTTP_GET, std::bind(&WebDashboard::handleApiLogs, this));
+    
+    _server.on("/api/finger/status", HTTP_GET, std::bind(&WebDashboard::handleApiFingerStatus, this));
+    _server.on("/api/finger/add", HTTP_POST, std::bind(&WebDashboard::handleApiFingerAdd, this));
+    _server.on("/api/finger/verify", HTTP_POST, std::bind(&WebDashboard::handleApiFingerVerify, this));
+    _server.on("/api/finger/delete", HTTP_POST, std::bind(&WebDashboard::handleApiFingerDelete, this));
+    _server.on("/api/finger/clearall", HTTP_POST, std::bind(&WebDashboard::handleApiFingerClearAll, this));
+    // FIX-CRIT-08: The UI exposed FOTA but the backend route did not exist.
+    _server.on("/update", HTTP_POST,
+               std::bind(&WebDashboard::handleUpdateFinished, this),
+               std::bind(&WebDashboard::handleUpdateUpload, this));
+    
+    _server.begin();
+    Serial.println("HTTP server started");
 }
 
-void handleApiStatus() {
-    String json = "{";
-    json += "\"state\":" + String((int)currentState) + ",";
-    json += "\"terminal_id\":\"" + terminal_id + "\",";
-    json += "\"imei\":\"" + modem_imei + "\",";
-    json += "\"ccid\":\"" + modem_ccid + "\",";
-    json += "\"lat\":" + String(current_lat, 6) + ",";
-    json += "\"lon\":" + String(current_lon, 6) + ",";
-    json += "\"time\":\"" + current_time + "\",";
-    json += "\"heap\":" + String(ESP.getFreeHeap());
-    json += "}";
-    
-    server->send(200, "application/json", json);
+void WebDashboard::handleClient() {
+    _server.handleClient();
 }
 
-void handleApiGetConfig() {
-    String json = "{";
-    json += "\"ssid\":\"" + app_wifi_ssid + "\",";
-    json += "\"pass\":\"" + app_wifi_pass + "\",";
-    json += "\"ip\":\"" + app_server_ip + "\",";
-    json += "\"port\":" + String(app_server_port) + ",";
-    json += "\"interval\":" + String(app_report_interval);
-    json += "}";
-    server->send(200, "application/json", json);
+bool WebDashboard::authenticate() {
+    // FIX-CRIT-08: Protect configuration, biometric operations and FOTA with
+    // HTTP Basic auth (user admin, password equals the AP password).
+    String password;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        password = state.apPass;
+        xSemaphoreGive(stateMutex);
+    }
+    if (_server.authenticate("admin", password.c_str())) return true;
+    _server.requestAuthentication(BASIC_AUTH, "S3 GPS Tracker");
+    return false;
 }
 
-void handleApiSaveConfig() {
-    if (server->hasArg("ssid")) {
-        app_wifi_ssid = server->arg("ssid");
+void WebDashboard::handleRoot() {
+    if (!authenticate()) return;
+    _server.send(200, "text/html", index_html);
+}
+
+void WebDashboard::handleApiStatus() {
+    if (!authenticate()) return;
+    JsonDocument doc;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Build state integer similar to s3gps
+        int s = 0;
+        if (!state.networkConnected) s = 3; // NO_NET
+        else if (!state.tcpConnected) s = 4; // NO_INET
+        else if (!state.gps.isValid) s = 5; // NO_GPS
+        else s = 6; // HAS_GPS
+        
+        doc["state"] = s;
+        doc["terminal_id"] = state.imei.length() >= 12 ? state.imei.substring(state.imei.length() - 12) : "N/A";
+        doc["imei"] = state.imei;
+        doc["ccid"] = state.ccid;
+        doc["lat"] = state.gps.latitude;
+        doc["lon"] = state.gps.longitude;
+        
+        char tbuf[32];
+        time_t tnow = state.gps.utcTime / 1000ULL;
+        if (tnow > 1000000000) {
+            time_t local_tnow = tnow + 7 * 3600; 
+            struct tm tm_local_buf; gmtime_r(&local_tnow, &tm_local_buf);
+            sprintf(tbuf, "%02d/%02d/20%02d %02d:%02d:%02d", tm_local_buf.tm_mday, tm_local_buf.tm_mon + 1, tm_local_buf.tm_year % 100, tm_local_buf.tm_hour, tm_local_buf.tm_min, tm_local_buf.tm_sec);
+        } else {
+            strcpy(tbuf, "N/A");
+        }
+        doc["time"] = tbuf;
+        
+        doc["speed"] = state.gps.speed;
+        doc["course"] = state.gps.course;
+        doc["vbat"] = state.vbatVoltage;
+        const bool overspeed = state.gps.speed > state.overspeedLimit;
+        doc["overspeed_limit"] = state.overspeedLimit;
+
+        doc["alarm_sos"] = state.alarmSos;
+        doc["alarm_overspeed"] = overspeed;
+        doc["alarm_fatigue"] = state.alarmFatigue;
+        doc["alarm_gps_ant"] = state.alarmGpsAntenna;
+        doc["alarm_power_cut"] = state.alarmPowerCut;
+        doc["alarm_collision"] = state.alarmCollision;
+        doc["status_acc"] = state.accState;
+        doc["use_phys_acc"] = state.usePhysicalAcc;
+        
+        uint32_t alarm = 0;
+        if (state.alarmSos) alarm |= (1UL << 0);
+        if (overspeed) alarm |= (1UL << 1);
+        if (state.alarmFatigue) alarm |= (1UL << 2);
+        if (state.alarmGpsAntenna) alarm |= (1UL << 5);
+        if (state.alarmPowerCut) alarm |= (1UL << 8);
+        if (state.alarmCollision) alarm |= (1UL << 20);
+        
+        uint32_t status = 0;
+        if (state.accState) status |= (1 << 0);
+        if (state.gps.isValid) status |= (1 << 1);
+        if (state.gps.latitude < 0) status |= (1 << 2);
+        if (state.gps.longitude < 0) status |= (1 << 3);
+        if (state.gps.speed > 2.0) status |= (1 << 10);
+        else status |= (1 << 11);
+        
+        char alarmHex[12];
+        char statusHex[12];
+        sprintf(alarmHex, "%08X", alarm);
+        sprintf(statusHex, "%08X", status);
+        
+        doc["alarm_hex"] = alarmHex;
+        doc["status_hex"] = statusHex;
+        doc["heap"] = state.freeHeap;
+        xSemaphoreGive(stateMutex);
     }
-    if (server->hasArg("pass")) {
-        app_wifi_pass = server->arg("pass");
+
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void WebDashboard::handleApiConfigGet() {
+    if (!authenticate()) return;
+    JsonDocument doc;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        doc["ssid"] = state.apSSID;
+        // Never echo the WiFi password back to every connected browser.
+        doc["pass"] = "";
+        doc["ip"] = state.serverHost;
+        doc["port"] = state.serverPort;
+        doc["interval"] = state.intervalSec;
+        doc["overspeed"] = state.overspeedLimit;
+        xSemaphoreGive(stateMutex);
     }
-    if (server->hasArg("ip")) {
-        app_server_ip = server->arg("ip");
+
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void WebDashboard::handleApiConfigPost() {
+    if (!authenticate()) return;
+    bool hasUpdate = false;
+    const String ssid = _server.arg("ssid");
+    const String pass = _server.arg("pass");
+    const String host = _server.arg("ip");
+    const int port = _server.arg("port").toInt();
+    const int interval = _server.arg("interval").toInt();
+    const int overspeed = _server.arg("overspeed").toInt();
+
+    bool hostValid = !host.isEmpty() && host.length() <= 128;
+    for (size_t i = 0; i < host.length() && hostValid; ++i) {
+        const char c = host[i];
+        hostValid = isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == ':';
     }
-    if (server->hasArg("port")) {
-        app_server_port = server->arg("port").toInt();
+    if (ssid.isEmpty() || ssid.length() > 32 || (!pass.isEmpty() && (pass.length() < 8 || pass.length() > 63)) ||
+        !hostValid || port < 1 || port > 65535 || interval < 5 || interval > 3600 ||
+        overspeed < 10 || overspeed > 200) {
+        _server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"invalid config\"}");
+        return;
     }
-    if (server->hasArg("interval")) {
-        app_report_interval = server->arg("interval").toInt();
+
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        state.apSSID = ssid;
+        if (!pass.isEmpty()) state.apPass = pass;
+        state.serverHost = host;
+        state.serverPort = port;
+        state.intervalSec = interval;
+        state.overspeedLimit = overspeed;
+        hasUpdate = true;
+        xSemaphoreGive(stateMutex);
+    }
+
+    if (hasUpdate) {
+        _config.save();
     }
     
-    saveConfig();
-    server->send(200, "text/plain", "OK");
+    _server.send(200, "application/json", "{\"status\":\"ok\"}");
     
-    // Reboot to apply new settings and restart modem connection cleanly
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     ESP.restart();
 }
 
-void web_init() {
-    server = new WebServer(80);
-    WiFi.softAP(app_wifi_ssid.c_str(), app_wifi_pass.c_str());
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("\n-I-AP IP address: ");
-    Serial.println(IP);
-    
-    server->on("/", HTTP_GET, handleRoot);
-    server->on("/api/status", HTTP_GET, handleApiStatus);
-    server->on("/api/config", HTTP_GET, handleApiGetConfig);
-    server->on("/api/save", HTTP_POST, handleApiSaveConfig);
-    server->begin();
-    Serial.println("-I-HTTP server started");
+void WebDashboard::handleApiToggleAlarm() {
+    if (!authenticate()) return;
+    if (!_server.hasArg("name") || !_server.hasArg("value")) {
+        _server.send(400, "application/json", "{\"ok\":false,\"msg\":\"missing name/value\"}");
+        return;
+    }
+
+    const String name = _server.arg("name");
+    const bool enabled = _server.arg("value") == "1";
+    bool recognized = true;
+    bool conflict = false;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        _server.send(503, "application/json", "{\"ok\":false,\"msg\":\"state busy\"}");
+        return;
+    }
+
+    if (name == "acc_phys") {
+        state.usePhysicalAcc = enabled;
+        state.accState = enabled ? state.physicalAccState : state.virtualAccState;
+    } else if (name == "acc") {
+        if (state.usePhysicalAcc) {
+            conflict = true;
+        } else {
+            state.virtualAccState = enabled;
+            state.accState = enabled;
+        }
+    } else if (name == "sos") {
+        state.alarmSos = enabled;
+    } else if (name == "fatigue") {
+        state.alarmFatigue = enabled;
+    } else if (name == "gps_ant") {
+        state.alarmGpsAntenna = enabled;
+    } else if (name == "power_cut") {
+        state.alarmPowerCut = enabled;
+    } else if (name == "collision") {
+        state.alarmCollision = enabled;
+    } else {
+        recognized = false;
+    }
+    xSemaphoreGive(stateMutex);
+
+    if (!recognized) {
+        _server.send(400, "application/json", "{\"ok\":false,\"msg\":\"unknown alarm\"}");
+    } else if (conflict) {
+        _server.send(409, "application/json", "{\"ok\":false,\"msg\":\"ACC is controlled by physical input\"}");
+    } else {
+        _config.save();
+        _server.send(200, "application/json", "{\"ok\":true}");
+    }
 }
 
-void web_loop() {
-    if (server) {
-        server->handleClient();
+void WebDashboard::handleApiLogs() {
+    if (!authenticate()) return;
+    JsonDocument doc;
+    JsonArray array = doc.to<JsonArray>();
+    
+    if (webLogsMutex && xSemaphoreTake(webLogsMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (const auto& log : webLogs) {
+            array.add(log);
+        }
+        xSemaphoreGive(webLogsMutex);
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void WebDashboard::handleApiFingerStatus() {
+    if (!authenticate()) return;
+    JsonDocument doc;
+    doc["sensorReady"] = _fingerprint.isReady();
+    doc["fingerCount"] = _fingerprint.getCachedUserCount();
+    doc["state"] = static_cast<int>(_fingerprint.getState());
+    doc["lastResult"] = _fingerprint.getLastResult();
+    doc["lastResultType"] = _fingerprint.getLastResultType();
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void WebDashboard::handleApiFingerAdd() {
+    if (!authenticate()) return;
+    const bool ok = _fingerprint.startAdding();
+    _server.send(ok ? 202 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"sensor busy/offline\"}");
+}
+
+void WebDashboard::handleApiFingerVerify() {
+    if (!authenticate()) return;
+    const bool ok = _fingerprint.startVerifying();
+    _server.send(ok ? 202 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"sensor busy/offline\"}");
+}
+
+void WebDashboard::handleApiFingerDelete() {
+    if (!authenticate()) return;
+    const int id = _server.arg("id").toInt();
+    const bool ok = id >= 1 && id <= 4095 && _fingerprint.startDeleting(id);
+    _server.send(ok ? 202 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"invalid id or sensor busy\"}");
+}
+
+void WebDashboard::handleApiFingerClearAll() {
+    if (!authenticate()) return;
+    const bool ok = _fingerprint.startClearAll();
+    _server.send(ok ? 202 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"sensor busy/offline\"}");
+}
+
+void WebDashboard::handleUpdateUpload() {
+    if (!authenticate()) {
+        Update.abort();
+        _updateSuccess = false;
+        return;
+    }
+    HTTPUpload& upload = _server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        _updateSuccess = Update.begin(UPDATE_SIZE_UNKNOWN);
+    } else if (upload.status == UPLOAD_FILE_WRITE && _updateSuccess) {
+        _updateSuccess = Update.write(upload.buf, upload.currentSize) == upload.currentSize;
+    } else if (upload.status == UPLOAD_FILE_END && _updateSuccess) {
+        _updateSuccess = Update.end(true);
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        _updateSuccess = false;
+    }
+}
+
+void WebDashboard::handleUpdateFinished() {
+    if (!authenticate()) return;
+    _server.send(_updateSuccess ? 200 : 500, "text/plain", _updateSuccess ? "OK" : "FAIL");
+    if (_updateSuccess) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        ESP.restart();
     }
 }
