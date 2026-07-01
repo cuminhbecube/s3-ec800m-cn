@@ -208,6 +208,17 @@ bool Codec8E::parseCommand(const std::vector<uint8_t>& packet, String& outComman
         return false;
     }
 
+    // Traccar custom commands can be configured as HEX. In that mode typing
+    // "acc0" / "acc1" produces two binary bytes AC C0 / AC C1 instead of the
+    // four ASCII bytes 61 63 63 30 / 31. Accept only these two explicit binary
+    // aliases; arbitrary non-printable Codec12 payloads remain rejected.
+    if (commandLength == 2 && packet[commandStart] == 0xAC &&
+        (packet[commandStart + 1] == 0xC0 || packet[commandStart + 1] == 0xC1)) {
+        outCommand = packet[commandStart + 1] == 0xC1 ? "acc1" : "acc0";
+        Serial.println("Codec12: decoded HEX ACC command as " + outCommand);
+        return true;
+    }
+
     outCommand.reserve(commandLength);
     for (size_t i = commandStart; i < quantity2; ++i) {
         const char c = static_cast<char>(packet[i]);

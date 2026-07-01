@@ -159,6 +159,8 @@ Command được gửi qua Codec12 command channel. Tên command không phân bi
 
 Các thao tác modem như `force_send`, `reconnect` và `gnss_restart` trả về trạng thái `queued/requested`; `Task_Network` thực thi ngay sau đó để tránh nhiều task truy cập UART cùng lúc.
 
+`acc0`/`acc1` chấp nhận cả Codec12 ASCII và custom command dạng HEX của Traccar (`AC C0`/`AC C1`). Với các command chữ khác, nên cấu hình Traccar gửi dạng text/ASCII thay vì bật tùy chọn HEX.
+
 ## Web Dashboard
 
 1. Kết nối Wi-Fi `S3_GPS_Tracker`.
