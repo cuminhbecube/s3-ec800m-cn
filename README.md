@@ -12,7 +12,7 @@ Firmware giám sát hành trình chạy trên ESP32-S3, sử dụng Quectel EC80
 - Lưu tối đa 5.000 records vào LittleFS khi mất mạng hoặc ACK không hợp lệ.
 - Chỉ xóa records sau khi ACK 4-byte bằng đúng số records đã gửi.
 - Khi mất GPS, dùng last-known location thật để gửi status heartbeat với GNSS invalid; không gửi tọa độ giả `(0,0)`.
-- Khi ACC OFF, chuyển sang `power_save`, giảm GNSS polling và gửi tối đa một status record mỗi 300 giây.
+- Khi ACC OFF, chuyển sang `SAVE_MODE`, tắt GNSS và chỉ mở TCP trong thời gian gửi một status record mỗi 300 giây.
 - Điều khiển ACC vật lý/ảo và cấu hình từ xa bằng Traccar custom command.
 - Web Dashboard cấu hình server, Wi-Fi, chu kỳ truyền và mô phỏng trạng thái/cảnh báo.
 - Quản lý cảm biến vân tay UART, NeoPixel, LED trạng thái, buzzer và OTA firmware.
@@ -43,6 +43,10 @@ Các chân và giá trị mặc định nằm trong [`include/config.h`](include
 | Số records tối đa mỗi packet | 6 |
 | Upload timeout khi ACC ON | 60 giây |
 | Heartbeat khi ACC OFF | 300 giây |
+| TCP khi ACC OFF | Mở → login → gửi 1 record → ACK → đóng |
+| Fingerprint retry khi ACC OFF | 600 giây |
+| System debug log | NORMAL: 10 giây; SAVE: 60 giây |
+| VBAT calibration multiplier | `11.225` |
 | Backlog tối đa | 5.000 records |
 | Traccar TCP port | 5027 |
 | Wi-Fi AP | `S3_GPS_Tracker` |
@@ -79,7 +83,7 @@ T+50s  sample #6
 
 - Fix không hợp lệ không được đưa vào buffer GPS tốc độ cao.
 - Nếu đã có last-known location thật, firmware có thể gửi status record tại vị trí cuối cùng với `satellites=0`, `speed=0`, `course=0`, `PDOP=0`, `HDOP=0` và IO 69 `GNSS Status=0`.
-- Nếu chưa từng có vị trí hợp lệ, firmware không encode `(0,0)`. Do AVL record bắt buộc có GPS element, thiết bị giữ phiên TCP/login hoạt động và ghi log thay vì tạo điểm sai trên bản đồ.
+- Nếu chưa từng có vị trí hợp lệ, firmware không encode `(0,0)` và bỏ qua heartbeat thay vì tạo điểm sai trên bản đồ.
 
 ## Chế độ nguồn theo ACC
 
@@ -93,14 +97,16 @@ T+50s  sample #6
 
 ### ACC OFF
 
-- Send mode: `POWER_SAVE`.
+- Send mode: `SAVE_MODE`.
 - Không tạo chuỗi GPS samples 10 giây.
-- GNSS polling giảm xuống một lần mỗi 300 giây; modem/network vẫn được giữ để nhận command và gửi heartbeat.
-- Nếu có last-known location, gửi tối đa một status record mỗi 300 giây.
-- Nếu đang có backlog từ lúc xe chạy, firmware force-flush đến khi hết hoặc giữ nguyên dữ liệu nếu gửi thất bại.
+- GNSS được tắt bằng `AT+QGPSEND`; heartbeat dùng last-known location với `gpsFix=0` và `satellites=0`.
+- TCP không được giữ liên tục. Mỗi 300 giây firmware mở TCP, login Codec8E, gửi đúng một record, chờ ACK rồi `AT+QICLOSE=0`.
+- Nếu ACK thất bại, firmware đóng socket, mở/login lại và thử thêm tối đa một lần. Nếu vẫn lỗi, record được giữ trong backlog đến chu kỳ sau.
+- Mỗi chu kỳ tạo heartbeat mới với system timestamp hiện tại; không tái sử dụng timestamp GNSS cũ.
+- Fingerprint offline chỉ retry mỗi 600 giây; system monitor và debug log chạy thưa hơn.
 - Chuyển ACC OFF → ON sẽ thoát power-save và yêu cầu gửi backlog còn lại.
 
-Hiện firmware giảm tần suất truy vấn GNSS nhưng không tắt toàn bộ EC800, vì vẫn cần TCP để nhận command và báo online.
+EC800 vẫn đăng ký mạng nhưng TCP/GNSS không chạy liên tục trong `SAVE_MODE`. `AT+CEREG?` chỉ dùng để quan sát đăng ký mạng trước khi cần kết nối, theo health-check 10 phút hoặc sau lỗi socket/ACK.
 
 ## Teltonika Codec 8E và IO mapping
 
@@ -125,7 +131,7 @@ Codec 8 Extended sử dụng IO count và IO ID dài 2 byte. Mapping hiện tạ
 
 - Dữ liệu được lưu trong ring buffer LittleFS với hai metadata slot và checksum.
 - Records cũ chưa ACK không bị ghi đè.
-- Mỗi packet được retry tối đa ba lần.
+- NORMAL retry tối đa ba lần trên socket hiện tại; SAVE đóng/mở TCP và login lại tối đa một lần sau ACK timeout.
 - ACK sai, timeout, TCP lỗi hoặc metadata commit lỗi đều giữ records để phát lại.
 - `force_send`, reconnect, restart và chuyển power mode không xóa backlog.
 - Factory reset hiện giữ backlog, chỉ reset custom config.
@@ -215,16 +221,28 @@ Sent and ACKed 6 records.
 
 ```text
 ACC changed: ON -> OFF
-Entering power_save mode (300s)
-Codec8E batch: ..., reason=forced
-Status heartbeat queued: ..., GNSS=0
+[POWER] Enter SAVE_MODE: acc=off, sendInterval=300s, batchSize=1, tcp=open-send-close, gnss=off-lastKnown
+[SAVE] Heartbeat queued: now=..., lastKnown=..., gpsFix=0, sats=0, reason=save_heartbeat
+[SAVE] Opening TCP for one-shot send
+Codec8E Login Accepted!
+Codec8E batch: records=1/1, ..., reason=save_timer
+Sent and ACKed 1 records.
+[SAVE] ACK OK, closing TCP
+AT TX: AT+QICLOSE=0
+```
+
+### Status debug
+
+NORMAL ghi mỗi 10 giây, SAVE ghi mỗi 60 giây với cùng một định dạng:
+
+```text
+[SYSTEM] mode=SAVE io={acc:0,phy:0,virt:0,src:PHY} power={vbat:3.96V,pct:73%} net={reg:1,tcp:0,rssi:24} gps={fix:0,sats:0} backlog=2 heap=79700 temp=42.1C
 ```
 
 ### Không có vị trí hợp lệ
 
 ```text
-No GPS fix and no last known location, sending status-only heartbeat if supported:
-Codec8E AVL requires a GPS element, keeping TCP session alive instead
+No GPS fix and no last known location; heartbeat not queued
 ```
 
 ## Checklist kiểm thử với Traccar
@@ -233,7 +251,7 @@ Codec8E AVL requires a GPS element, keeping TCP session alive instead
 2. Mất mạng: backlog tăng; khi mạng trở lại records được phát lại và chỉ commit sau ACK.
 3. Mất GPS sau khi có fix: Traccar vẫn nhận status heartbeat, GNSS status bằng 0 và không xuất hiện chuyển động giả.
 4. Boot chưa từng có GPS: không xuất hiện điểm `(0,0)`.
-5. ACC OFF: không có packet 10 giây; tối đa một status record mỗi 300 giây sau khi backlog cũ được flush.
+5. ACC OFF: không có packet 10 giây; mỗi chu kỳ chỉ gửi một record, TCP phải đóng giữa hai chu kỳ.
 6. ACC OFF → ON: sampling nhanh hoạt động lại và backlog được gửi.
 7. Kiểm tra `acc1`, `acc0`, `acc?`, `force_send`, `reconnect`, `gnss_restart`, `set_batch`, `set_sample` và factory-reset confirmation.
 
@@ -274,6 +292,6 @@ flowchart TD
 ## Giới hạn hiện tại
 
 - Chưa có automated integration test với một Traccar server thật; cần xác nhận ACK và positions sau khi flash.
-- Power-save giảm polling nhưng chưa đưa toàn bộ modem vào deep sleep vì cần giữ command channel.
+- SAVE_MODE tắt GNSS và TCP giữa các chu kỳ nhưng chưa đưa toàn bộ modem/ESP32 vào deep sleep.
 - `force_send` phản hồi khi request được queue, không chờ đồng bộ đến ACK trong cùng command response.
 - AVL IO mapping 66/67 là mapping tùy biến của dự án và cần khớp parser/model profile trên Traccar.

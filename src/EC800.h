@@ -15,12 +15,16 @@ public:
     
     // GPS Functions
     bool enableGPS();
+    bool disableGPS();
     bool restartGPS();
     bool parseGPS(float& lat, float& lon, float& speed, float& course, float& alt,
                   uint8_t& sats, float& pdop, float& hdop, uint64_t& utcTime, bool& isValid);
     
     // Network Functions
-    bool isNetworkRegistered();
+    // Returns the EPS registration stat (0..5), or -1 if no valid CEREG
+    // response was received. Registered states are 1 (home) and 5 (roaming).
+    int getNetworkRegistrationStatus();
+    bool takeNetworkRegistrationUrc(int& stat);
     int getRSSI();
     bool getNetworkTime(int& year, int& month, int& day, int& hour, int& minute, int& second, int& tz_quarters);
     bool getGNSSTime(int& year, int& month, int& day, int& hour, int& minute, int& second);
@@ -40,9 +44,12 @@ private:
     int _pwrkeyPin;
     int _rstPin;
     bool _tcpDataPending = false;
+    int _networkRegistrationStatus = -1;
+    bool _networkRegistrationChanged = false;
     
     String sendATCommand(const String& command, uint32_t timeout = 1000, const String& expectedResponse = "OK");
     void drainInput();
+    void handleModemLine(const String& line);
     std::vector<String> splitString(const String& str, char delimiter);
 };
 

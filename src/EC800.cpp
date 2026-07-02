@@ -18,12 +18,19 @@ void EC800::begin(unsigned long baudrate, int rxPin, int txPin) {
 }
 
 bool EC800::init() {
+    _networkRegistrationStatus = -1;
+    _networkRegistrationChanged = false;
     drainInput();
     // Disable echo
     sendATCommand("ATE0", 1000);
     // Check communication
     const String response = sendATCommand("AT", 1000);
     if (response.indexOf("OK") == -1) return false;
+
+    // Enable EPS registration URCs. CEREG is an observation mechanism only;
+    // it does not keep PDP or TCP sessions alive.
+    const String ceregResponse = sendATCommand("AT+CEREG=1", 1000);
+    if (ceregResponse.indexOf("OK") == -1) return false;
     
     return true;
 }
@@ -71,6 +78,12 @@ bool EC800::enableGPS() {
     String resp = sendATCommand("AT+QGPS=1", 2000); // Enable GPS
     // It might return OK, or +CME ERROR: 504 if already running
     return (resp.indexOf("OK") != -1 || resp.indexOf("504") != -1);
+}
+
+bool EC800::disableGPS() {
+    const String resp = sendATCommand("AT+QGPSEND", 2000);
+    // Some firmware reports an error when GNSS is already stopped.
+    return resp.indexOf("OK") != -1 || resp.indexOf("504") != -1;
 }
 
 bool EC800::restartGPS() {
@@ -220,7 +233,9 @@ bool EC800::parseGPS(float& lat, float& lon, float& speed, float& course, float&
                             }
                         }
                         
-                        isValid = true;
+                        // RMC=A alone is not enough for the UI/AVL fix flag when
+                        // GGA reports no satellites (or could not be parsed).
+                        isValid = sats > 0;
                         return true;
                     }
                 }
@@ -230,13 +245,16 @@ bool EC800::parseGPS(float& lat, float& lon, float& speed, float& course, float&
     return false;
 }
 
-bool EC800::isNetworkRegistered() {
-    // FIX-CRIT-01: EC800 is LTE; EPS registration is authoritative. Keep CREG
-    // as a fallback for firmware variants that do not expose CEREG.
+int EC800::getNetworkRegistrationStatus() {
     String resp = sendATCommand("AT+CEREG?", 1000);
-    if (resp.indexOf(",1") != -1 || resp.indexOf(",5") != -1) return true;
-    resp = sendATCommand("AT+CREG?", 1000);
-    return resp.indexOf(",1") != -1 || resp.indexOf(",5") != -1;
+    return resp.indexOf("+CEREG:") != -1 ? _networkRegistrationStatus : -1;
+}
+
+bool EC800::takeNetworkRegistrationUrc(int& stat) {
+    if (!_networkRegistrationChanged) return false;
+    stat = _networkRegistrationStatus;
+    _networkRegistrationChanged = false;
+    return true;
 }
 
 bool EC800::getNetworkTime(int& year, int& month, int& day, int& hour, int& minute, int& second, int& tz_quarters) {
@@ -357,6 +375,7 @@ bool EC800::connectTCP(const String& host, uint16_t port) {
                 String printLine = currentLine;
                 printLine.replace("\r", "");
                 if (printLine.length() > 0) Serial.println("AT RX: " + printLine);
+                handleModemLine(printLine);
                 currentLine = "";
             } else {
                 currentLine += c;
@@ -427,6 +446,7 @@ bool EC800::sendTCP(const std::vector<uint8_t>& data) {
                 String printLine = currentLine;
                 printLine.replace("\r", "");
                 if (printLine.length() > 0) Serial.println("AT RX: " + printLine);
+                handleModemLine(printLine);
                 if (printLine.indexOf("SEND OK") != -1) {
                     currentLine = ""; // Reset before return to avoid double-print
                     return true;
@@ -458,6 +478,7 @@ bool EC800::readTCP(std::vector<uint8_t>& data, uint32_t timeoutMs, size_t maxBy
                 String printLine = currentLine;
                 printLine.replace("\r", "");
                 if (printLine.length() > 0) Serial.println("AT RX: " + printLine);
+                handleModemLine(printLine);
                 if (printLine.indexOf("+QIURC: \"recv\"") != -1) {
                     urcReceived = true;
                     currentLine = ""; // Reset before break to avoid double-print
@@ -498,6 +519,7 @@ bool EC800::readTCP(std::vector<uint8_t>& data, uint32_t timeoutMs, size_t maxBy
                     String printLine = header;
                     printLine.replace("\r", ""); printLine.replace("\n", "");
                     if (printLine.length() > 0) Serial.println("AT RX: " + printLine);
+                    handleModemLine(printLine);
 
                     if (header.indexOf("+QIRD:") != -1) {
                         int spaceIdx = header.indexOf(' ');
@@ -562,6 +584,7 @@ String EC800::sendATCommand(const String& command, uint32_t timeout, const Strin
                 if (printLine.length() > 0) {
                     Serial.println("AT RX: " + printLine);
                 }
+                handleModemLine(printLine);
                 currentLine = "";
             } else {
                 currentLine += c;
@@ -578,6 +601,7 @@ String EC800::sendATCommand(const String& command, uint32_t timeout, const Strin
                     String printLine = currentLine;
                     printLine.replace("\r", "");
                     if (printLine.length() > 0) Serial.println("AT RX: " + printLine);
+                    handleModemLine(printLine);
                     currentLine = "";
                 } else {
                     currentLine += c;
@@ -620,6 +644,37 @@ void EC800::drainInput() {
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     if (drained.indexOf("+QIURC: \"recv\"") != -1) _tcpDataPending = true;
+    int lineStart = 0;
+    while (lineStart < static_cast<int>(drained.length())) {
+        int lineEnd = drained.indexOf('\n', lineStart);
+        if (lineEnd == -1) lineEnd = drained.length();
+        String line = drained.substring(lineStart, lineEnd);
+        line.replace("\r", "");
+        handleModemLine(line);
+        lineStart = lineEnd + 1;
+    }
+}
+
+void EC800::handleModemLine(const String& line) {
+    const int prefix = line.indexOf("+CEREG:");
+    if (prefix == -1) return;
+
+    String fields = line.substring(prefix + 7);
+    fields.trim();
+    const int comma = fields.indexOf(',');
+    // With CEREG=1, a query is <n>,<stat>, while a URC is just <stat>.
+    String statText = comma == -1 ? fields : fields.substring(comma + 1);
+    const int nextComma = statText.indexOf(',');
+    if (nextComma != -1) statText = statText.substring(0, nextComma);
+    statText.trim();
+    if (statText.length() == 0 || !isDigit(statText[0])) return;
+
+    const int stat = statText.toInt();
+    if (stat < 0 || stat > 5) return;
+    if (_networkRegistrationStatus != stat) {
+        _networkRegistrationStatus = stat;
+        _networkRegistrationChanged = true;
+    }
 }
 
 std::vector<String> EC800::splitString(const String& str, char delimiter) {

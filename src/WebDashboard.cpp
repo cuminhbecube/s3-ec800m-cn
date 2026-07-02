@@ -69,7 +69,7 @@ void WebDashboard::handleApiStatus() {
         int s = 0;
         if (!state.networkConnected) s = 3; // NO_NET
         else if (!state.tcpConnected) s = 4; // NO_INET
-        else if (!state.gps.isValid) s = 5; // NO_GPS
+        else if (!state.gps.gpsFixValid) s = 5; // NO_GPS
         else s = 6; // HAS_GPS
         
         doc["state"] = s;
@@ -115,7 +115,7 @@ void WebDashboard::handleApiStatus() {
         
         uint32_t status = 0;
         if (state.accState) status |= (1 << 0);
-        if (state.gps.isValid) status |= (1 << 1);
+        if (state.gps.gpsFixValid) status |= (1 << 1);
         if (state.gps.latitude < 0) status |= (1 << 2);
         if (state.gps.longitude < 0) status |= (1 << 3);
         if (state.gps.speed > 2.0) status |= (1 << 10);

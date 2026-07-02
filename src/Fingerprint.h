@@ -47,7 +47,7 @@ public:
     FingerprintManager(HardwareSerial& serial, int wakePin);
     
     bool begin(uint32_t baudrate, int rxPin, int txPin);
-    void loop();
+    void loop(bool saveMode = false);
     
     void setCallbacks(void (*onMatch)(int), void (*onNoMatch)());
     
@@ -86,6 +86,7 @@ private:
     unsigned long _lastTouchTime = 0;
     unsigned long _lastRefresh = 0;
     unsigned long _lastReconnectAttempt = 0;
+    bool _saveModePauseLogged = false;
     
     void (*_onMatch)(int) = nullptr;
     void (*_onNoMatch)() = nullptr;

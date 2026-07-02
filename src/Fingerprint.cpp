@@ -1,4 +1,5 @@
 #include "Fingerprint.h"
+#include "config.h"
 #include <FreeRTOS.h>
 #include <task.h>
 
@@ -317,10 +318,18 @@ void FingerprintManager::processOperation() {
     }
 }
 
-void FingerprintManager::loop() {
+void FingerprintManager::loop(bool saveMode) {
     unsigned long now = millis();
     if (!_sensorReady) {
-        if (now - _lastReconnectAttempt < 10000) return;
+        const uint32_t retryInterval = saveMode ? SAVE_FINGERPRINT_RETRY_MS
+                                                : NORMAL_FINGERPRINT_RETRY_MS;
+        if (saveMode && !_saveModePauseLogged) {
+            Serial.println("[POWER] Fingerprint detection paused; retry every 600s in SAVE_MODE");
+            _saveModePauseLogged = true;
+        } else if (!saveMode) {
+            _saveModePauseLogged = false;
+        }
+        if (now - _lastReconnectAttempt < retryInterval) return;
         _lastReconnectAttempt = now;
         setResult("Retrying fingerprint sensor", "warning");
         Serial.println("Retrying fingerprint sensor detection...");
@@ -336,7 +345,8 @@ void FingerprintManager::loop() {
             setResult("Fingerprint sensor reconnected", "success");
             Serial.println("Fingerprint sensor reconnected.");
         } else {
-            setResult("Fingerprint sensor offline; retry in 10s", "error");
+            setResult(saveMode ? "Fingerprint offline; retry in 10min"
+                               : "Fingerprint sensor offline; retry in 10s", "error");
         }
         return;
     }

@@ -19,7 +19,8 @@ struct GPSData {
   float pdop = 0.0;
   float hdop = 0.0;
   uint64_t utcTime = 0;
-  bool isValid = false;
+  // Live GNSS fix only; last-known coordinates are tracked separately below.
+  bool gpsFixValid = false;
 };
 
 struct SystemState {

@@ -51,10 +51,9 @@ void onFingerprintNoMatch() {
 // Helper: Read VBAT
 void readVBAT() {
     int raw = analogRead(VBAT_ADC_PIN);
-    // Hardware has a 1:11 voltage divider. 
-    // Raw ADC ~455 corresponds to ~0.366V at the pin, which is 4.21V at the battery.
-    // Multiplier = 4.21 / (455 / 4095.0 * 3.3) = 11.48
-    float voltage = (raw / 4095.0) * 3.3 * 11.48;
+    // Hardware has a nominal 1:11 divider; use the board-level calibrated
+    // multiplier because divider and ESP32 ADC tolerances shift the result.
+    float voltage = (raw / 4095.0f) * 3.3f * VBAT_DIVIDER_CALIBRATION;
     
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         state.vbatVoltage = (state.vbatVoltage == 0.0) ? voltage : (state.vbatVoltage * 0.9 + voltage * 0.1);
@@ -196,7 +195,7 @@ static void pollGPS() {
     }
 
     if (gpsOk && isValid) {
-        if (speed < 2.0f && state.gps.isValid) {
+        if (speed < 2.0f && state.gps.gpsFixValid) {
             lat = state.gps.latitude;
             lon = state.gps.longitude;
             course = state.gps.course;
@@ -219,7 +218,7 @@ static void pollGPS() {
         state.gps.pdop = pdop;
         state.gps.hdop = hdop;
         state.gps.utcTime = utcTime;
-        state.gps.isValid = true;
+        state.gps.gpsFixValid = true;
         state.hasLastKnownLocation = true;
         gpsFixAcquired = !previousGpsValid &&
                          (lastGpsFixBeep == 0 || millis() - lastGpsFixBeep >= 60000);
@@ -250,7 +249,7 @@ static void pollGPS() {
         state.gps.satellites = 0;
         state.gps.pdop = 0.0f;
         state.gps.hdop = 0.0f;
-        state.gps.isValid = false;
+        state.gps.gpsFixValid = false;
         previousGpsValid = false;
         odometerInitialized = false;
     }
@@ -285,6 +284,9 @@ static String formatUtcTimestamp(uint64_t utcTimeMs) {
 
 // Network Task
 void Task_Network(void *pvParameters) {
+    constexpr uint32_t CEREG_FAST_POLL_MS = 3000;
+    constexpr uint32_t CEREG_HEALTH_CHECK_MS = SAVE_CEREG_CHECK_INTERVAL_MS;
+    constexpr int CEREG_NETWORK_WAIT_POLLS = 40; // 120 seconds
     int init_step = 0;
     unsigned long action_timer = 0;
     int sim_err_cnt = 0;
@@ -293,7 +295,12 @@ void Task_Network(void *pvParameters) {
     bool is_ready_to_send = false;
     uint32_t lastGpsRead = 0;
     uint32_t lastBatchSend = millis();
+    uint32_t lastCeregHealthCheck = 0;
     bool gpsEnabled = false;
+    bool networkAccInitialized = false;
+    bool previousNetworkAccOn = true;
+    bool saveCycleActive = false;
+    uint8_t saveAckReopenRetries = 0;
     uint32_t factoryResetCode = 0;
     uint32_t factoryResetCodeExpires = 0;
     
@@ -304,6 +311,36 @@ void Task_Network(void *pvParameters) {
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
             accOnForPolling = state.accState;
             xSemaphoreGive(stateMutex);
+        }
+        const bool saveMode = !accOnForPolling;
+        if (!networkAccInitialized) {
+            previousNetworkAccOn = accOnForPolling;
+            networkAccInitialized = true;
+        } else if (accOnForPolling != previousNetworkAccOn) {
+            previousNetworkAccOn = accOnForPolling;
+            saveCycleActive = false;
+            saveAckReopenRetries = 0;
+            if (saveMode) {
+                // SAVE_MODE never inherits a long-lived normal-mode socket.
+                if (is_ready_to_send) ec800.closeTCP();
+                is_ready_to_send = false;
+                if (gpsEnabled) gpsEnabled = !ec800.disableGPS();
+                lastBatchSend = millis();
+                if (init_step >= 6) init_step = 7;
+                if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    state.tcpConnected = false;
+                    state.gps.gpsFixValid = false;
+                    state.gps.satellites = 0;
+                    xSemaphoreGive(stateMutex);
+                }
+            } else {
+                gpsEnabled = ec800.enableGPS();
+                lastGpsRead = millis() - 5000UL;
+                if (init_step == 7 && !is_ready_to_send) {
+                    init_step = 6;
+                    action_timer = millis() - 3000UL;
+                }
+            }
         }
         const uint32_t gpsPollInterval = accOnForPolling ? 5000UL : POWER_SAVE_INTERVAL_SEC * 1000UL;
         if (gpsEnabled && millis() - lastGpsRead >= gpsPollInterval) {
@@ -383,21 +420,23 @@ void Task_Network(void *pvParameters) {
                         xSemaphoreGive(stateMutex);
                     }
                     Serial.println("EC800 IMEI: " + imei);
-                    gpsEnabled = ec800.enableGPS();
-                    // Poll once immediately even when booting into power save;
-                    // subsequent ACC-OFF polls use the reduced 300 s cadence.
-                    lastGpsRead = millis() - POWER_SAVE_INTERVAL_SEC * 1000UL;
+                    // Strong SAVE_MODE policy: GNSS stays off while ACC is off;
+                    // status records use last-known position with GNSS=0.
+                    gpsEnabled = accOnForPolling && ec800.enableGPS();
+                    if (!accOnForPolling) ec800.disableGPS();
+                    lastGpsRead = millis() - 5000UL;
                     sim_err_cnt = 0;
                     init_step++;
                 }
             }
         } else if (init_step == 5) {
-            if (now - action_timer >= 3000) {
-                if (!ec800.isNetworkRegistered()) {
-                    Serial.println("Waiting for network...");
+            if (now - action_timer >= CEREG_FAST_POLL_MS) {
+                const int ceregStat = ec800.getNetworkRegistrationStatus();
+                if (ceregStat != 1 && ceregStat != 5) {
+                    Serial.printf("Waiting for network (CEREG stat=%d)...\n", ceregStat);
                     net_err_cnt++;
-                    if (net_err_cnt >= 10) { // ~30s
-                        Serial.println("Network timeout. Resetting Hardware...");
+                    if (net_err_cnt >= CEREG_NETWORK_WAIT_POLLS) {
+                        Serial.println("Network registration timeout (120s). Resetting modem...");
                         net_err_cnt = 0;
                         init_step = 0;
                     }
@@ -410,7 +449,8 @@ void Task_Network(void *pvParameters) {
                     Serial.println("Network Registered!");
                     syncSystemTime();
                     net_err_cnt = 0;
-                    init_step++;
+                    lastCeregHealthCheck = millis();
+                    init_step = saveMode ? 7 : 6;
                 }
             }
         } else if (init_step == 6) {
@@ -423,6 +463,7 @@ void Task_Network(void *pvParameters) {
                     xSemaphoreGive(stateMutex);
                 }
                 
+                if (saveMode) Serial.println("[SAVE] Opening TCP for one-shot send");
                 Serial.printf("Connecting to TCP: %s:%d...\n", host.c_str(), port);
                 if (ec800.connectTCP(host, port)) {
                     Serial.println("TCP Connected! Sending Login...");
@@ -446,17 +487,52 @@ void Task_Network(void *pvParameters) {
                             init_step++;
                         } else {
                             Serial.println("Codec8E Login Rejected/Timeout.");
+                            if (saveMode) {
+                                ec800.closeTCP();
+                                lastBatchSend = millis();
+                                saveCycleActive = false;
+                                init_step = 7;
+                            }
                             action_timer = now;
                         }
                     } else {
                         Serial.println("Failed to send login packet.");
+                        if (saveMode) {
+                            ec800.closeTCP();
+                            lastBatchSend = millis();
+                            saveCycleActive = false;
+                            init_step = 7;
+                        }
                         action_timer = now;
                     }
                 } else {
                     Serial.println("TCP Connect Failed!");
+                    if (saveMode) {
+                        Serial.println("[SAVE] TCP open failed; keep backlog until next cycle");
+                        ec800.closeTCP();
+                        lastBatchSend = millis();
+                        saveCycleActive = false;
+                        init_step = 7;
+                        action_timer = now;
+                        continue;
+                    }
                     net_err_cnt++;
                     if (net_err_cnt >= 5) {
-                        init_step = 0;
+                        const int ceregStat = ec800.getNetworkRegistrationStatus();
+                        if (ceregStat == 1 || ceregStat == 5) {
+                            Serial.printf("CEREG stat=%d; retrying socket without modem reset.\n", ceregStat);
+                            ec800.closeTCP();
+                            net_err_cnt = 0;
+                            init_step = 6;
+                        } else {
+                            Serial.printf("CEREG stat=%d; returning to network registration wait.\n", ceregStat);
+                            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                                state.networkConnected = false;
+                                xSemaphoreGive(stateMutex);
+                            }
+                            net_err_cnt = 0;
+                            init_step = 5;
+                        }
                     }
                     action_timer = now;
                 }
@@ -507,10 +583,20 @@ void Task_Network(void *pvParameters) {
                 forceSend = state.forceSendRequested;
                 xSemaphoreGive(stateMutex);
             }
-            const uint32_t activeSendIntervalSec = accOn ? sendIntervalSec : POWER_SAVE_INTERVAL_SEC;
+            const uint32_t activeSendIntervalMs = accOn ? sendIntervalSec * 1000UL
+                                                        : SAVE_SEND_INTERVAL_MS;
             const bool batchFull = accOn && count >= batchSize;
             const bool sendTimeout = count > 0 &&
-                    millis() - lastBatchSend >= static_cast<uint64_t>(activeSendIntervalSec) * 1000ULL;
+                    millis() - lastBatchSend >= activeSendIntervalMs;
+
+            if (saveMode && count > 0 && sendTimeout && !is_ready_to_send) {
+                // Open only when this five-minute one-shot upload is due.
+                saveCycleActive = true;
+                saveAckReopenRetries = 0;
+                init_step = 6;
+                action_timer = millis() - 3000UL;
+                continue;
+            }
 
             if (count > 0 && is_ready_to_send && (forceSend || batchFull || sendTimeout)) {
                 if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -518,7 +604,7 @@ void Task_Network(void *pvParameters) {
                     xSemaphoreGive(stateMutex);
                 }
                 
-                const uint8_t sendLimit = (!accOn && !forceSend) ? 1 : batchSize;
+                const uint8_t sendLimit = !accOn ? SAVE_BATCH_SIZE : batchSize;
                 uint8_t toSend = count > sendLimit ? sendLimit : count;
                 auto records = backlog.peekRecords(toSend);
                 if (records.size() != toSend) {
@@ -542,7 +628,7 @@ void Task_Network(void *pvParameters) {
                               "crc=%04lX, reason=%s\n",
                               packet[9], packet[8 + dataFieldLength - 1], dataFieldLength,
                               static_cast<unsigned>(packet.size()), packetCrc,
-                              forceSend ? "forced" : (batchFull ? "full" : "timeout"));
+                              !accOn ? "save_timer" : (forceSend ? "forced" : (batchFull ? "full" : "timeout")));
                 for (uint8_t i = 0; i < toSend; ++i) {
                     Serial.printf("  AVL[%u]: ts=%llu, lat=%.7f, lon=%.7f, sats=%u\n",
                                   i, static_cast<unsigned long long>(records[i].gps.utcTime),
@@ -550,9 +636,10 @@ void Task_Network(void *pvParameters) {
                                   records[i].gps.satellites);
                 }
                 
-                // ACK Retry logic: retry up to 3 times (REQUIREMENTS §4)
+                // Normal mode retains three same-socket attempts; SAVE_MODE uses one.
                 bool ackOk = false;
-                for (int retry = 0; retry < 3 && !ackOk; retry++) {
+                const int sameSocketAttempts = saveMode ? 1 : 3;
+                for (int retry = 0; retry < sameSocketAttempts && !ackOk; retry++) {
                     if (retry > 0) {
                         Serial.printf("ACK Retry %d/3...\n", retry + 1);
                         addWebLog(String("TX: Retry ") + (retry + 1));
@@ -596,16 +683,51 @@ void Task_Network(void *pvParameters) {
                     }
                 }
                 
-                if (!ackOk) {
-                    // FIX-CRIT-02: At-least-once delivery. Never discard a
-                    // record without the exact server ACK; reconnect and replay.
+                if (ackOk && saveMode && SAVE_TCP_CLOSE_AFTER_ACK) {
+                    Serial.println("[SAVE] ACK OK, closing TCP");
+                    ec800.closeTCP();
                     is_ready_to_send = false;
+                    saveCycleActive = false;
+                    saveAckReopenRetries = 0;
                     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         state.tcpConnected = false;
                         xSemaphoreGive(stateMutex);
                     }
+                }
+
+                if (!ackOk) {
+                    // FIX-CRIT-02: At-least-once delivery. Never discard a
+                    // record without the exact server ACK. Diagnose EPS before
+                    // deciding whether to reopen the socket or wait for network.
+                    is_ready_to_send = false;
+                    const int ceregStat = ec800.getNetworkRegistrationStatus();
+                    const bool networkRegistered = ceregStat == 1 || ceregStat == 5;
+                    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        state.tcpConnected = false;
+                        state.networkConnected = networkRegistered;
+                        xSemaphoreGive(stateMutex);
+                    }
                     ec800.closeTCP();
-                    init_step = 6;
+                    if (saveMode && saveCycleActive &&
+                            saveAckReopenRetries < SAVE_ACK_REOPEN_RETRY_MAX) {
+                        ++saveAckReopenRetries;
+                        Serial.println("[SAVE] ACK failed, close TCP and reopen once");
+                        init_step = networkRegistered ? 6 : 5;
+                    } else if (saveMode) {
+                        Serial.println("[SAVE] ACK failed, close TCP and keep backlog");
+                        lastBatchSend = millis();
+                        saveCycleActive = false;
+                        saveAckReopenRetries = 0;
+                        init_step = networkRegistered ? 7 : 5;
+                    } else if (networkRegistered) {
+                        Serial.printf("ACK/send failure with CEREG stat=%d; reopening TCP and logging in again.\n",
+                                      ceregStat);
+                        init_step = 6;
+                    } else {
+                        Serial.printf("ACK/send failure with CEREG stat=%d; waiting for network.\n", ceregStat);
+                        init_step = 5;
+                        net_err_cnt = 0;
+                    }
                     action_timer = millis();
                 }
             } else {
@@ -699,7 +821,7 @@ void Task_Network(void *pvParameters) {
                                 const time_t currentTime = time(nullptr);
                                 if (canQueue && currentTime > 1000000000) {
                                     heartbeat.gps.utcTime = static_cast<uint64_t>(currentTime) * 1000ULL;
-                                    heartbeat.gps.isValid = false;
+                                    heartbeat.gps.gpsFixValid = false;
                                     heartbeat.gps.satellites = 0;
                                     heartbeat.gps.speed = 0;
                                     heartbeat.gps.course = 0;
@@ -780,7 +902,7 @@ void Task_Network(void *pvParameters) {
                                 info += ", RSSI=" + String(state.rssi);
                                 info += ", ACC=" + String(state.accState ? 1 : 0);
                                 info += ", ACC_MODE=" + String(state.usePhysicalAcc ? "PHYSICAL" : "VIRTUAL");
-                                info += ", GPS=" + String(state.gps.isValid ? "FIX" : "NOFIX");
+                                info += ", GPS=" + String(state.gps.gpsFixValid ? "FIX" : "NOFIX");
                                 info += ", SAT=" + String(state.gps.satellites);
                                 info += ", LAST_LOC=" + formatUtcTimestamp(state.gps.utcTime);
                                 info += ", INTERVAL=" + String(state.intervalSec);
@@ -820,7 +942,7 @@ void Task_Network(void *pvParameters) {
                                 response = String(state.gps.latitude, 6) + "," + String(state.gps.longitude, 6);
                                 response += ", SPD=" + String(state.gps.speed, 1);
                                 response += ", SAT=" + String(state.gps.satellites);
-                                response += ", FIX=" + String(state.gps.isValid ? "Y" : "N");
+                                response += ", FIX=" + String(state.gps.gpsFixValid ? "Y" : "N");
                                 xSemaphoreGive(stateMutex);
                             }
                             
@@ -900,20 +1022,38 @@ void Task_Network(void *pvParameters) {
                 }
             }
             
-            // Periodically check if network is still alive
-            static unsigned long lastNetCheck = 0;
-            if (millis() - lastNetCheck > 10000) {
-                if (!ec800.isNetworkRegistered()) {
+            // React to registration-change URCs, with a sparse query only as a
+            // health check. Application AVL/status packets remain the TCP heartbeat.
+            int ceregUrcStat = -1;
+            if (ec800.takeNetworkRegistrationUrc(ceregUrcStat) &&
+                    ceregUrcStat != 1 && ceregUrcStat != 5) {
+                Serial.printf("CEREG URC reports network loss (stat=%d).\n", ceregUrcStat);
+                is_ready_to_send = false;
+                ec800.closeTCP();
+                if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    state.tcpConnected = false;
+                    state.networkConnected = false;
+                    xSemaphoreGive(stateMutex);
+                }
+                init_step = 5;
+                net_err_cnt = 0;
+                action_timer = millis();
+            } else if (millis() - lastCeregHealthCheck >= CEREG_HEALTH_CHECK_MS) {
+                const int ceregStat = ec800.getNetworkRegistrationStatus();
+                lastCeregHealthCheck = millis();
+                if (ceregStat != 1 && ceregStat != 5) {
+                    Serial.printf("CEREG health check failed (stat=%d).\n", ceregStat);
                     is_ready_to_send = false;
+                    ec800.closeTCP();
                     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                         state.tcpConnected = false;
                         state.networkConnected = false;
                         xSemaphoreGive(stateMutex);
                     }
                     init_step = 5; // Go back to network check
+                    net_err_cnt = 0;
                     action_timer = millis();
                 }
-                lastNetCheck = millis();
             }
         }
         
@@ -949,21 +1089,32 @@ void Task_Sensors(void *pvParameters) {
             previousAccState = accOn;
             accStateInitialized = true;
             Serial.printf("Initial send mode: %s\n", accOn ? "normal" : "power_save");
+            if (!accOn) {
+                Serial.println("[POWER] Enter SAVE_MODE: acc=off, sendInterval=300s, batchSize=1, "
+                               "tcp=open-send-close, gnss=off-lastKnown");
+            }
             addWebLog(accOn ? "Send mode: normal" : "Send mode: power_save (300s)");
         } else if (accOn != previousAccState) {
             Serial.printf("ACC changed: %s -> %s\n", previousAccState ? "ON" : "OFF", accOn ? "ON" : "OFF");
             addWebLog(accOn ? "Leaving power_save mode" : "Entering power_save mode (300s)");
+            if (accOn) {
+                Serial.println("[POWER] Exit SAVE_MODE: acc=on/motion");
+            } else {
+                Serial.println("[POWER] Enter SAVE_MODE: acc=off, sendInterval=300s, batchSize=1, "
+                               "tcp=open-send-close, gnss=off-lastKnown");
+            }
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                // Flush pending driving records before settling into power save,
-                // and flush persisted records immediately when driving resumes.
-                state.forceSendRequested = backlog.getRecordCount() > 0;
+                // Resume flushes immediately; SAVE_MODE sends one record only
+                // when its five-minute timer expires.
+                state.forceSendRequested = accOn && backlog.getRecordCount() > 0;
                 xSemaphoreGive(stateMutex);
             }
             lastStatusHeartbeat = millis();
             previousAccState = accOn;
         }
         
-        if (millis() - lastHeapUpdate >= 1000) {
+        const uint32_t monitorInterval = accOn ? 1000UL : SAVE_ALIVE_LOG_INTERVAL_MS;
+        if (millis() - lastHeapUpdate >= monitorInterval) {
             if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 state.freeHeap = ESP.getFreeHeap();
                 state.temperature = temperatureRead(); // ESP32 internal temp sensor
@@ -990,7 +1141,7 @@ void Task_Sensors(void *pvParameters) {
             }
             // FIX-CRIT-06: Flash I/O must not happen while stateMutex is held.
             if (captured) {
-                if (!snapshot.gps.isValid || snapshot.gps.satellites == 0) {
+                if (!snapshot.gps.gpsFixValid || snapshot.gps.satellites == 0) {
                     // Invalid fixes never enter the high-rate GPS position buffer.
                 } else if (snapshot.gps.utcTime < 1000000000000ULL) {
                     addWebLog("WARN: Record skipped until UTC is known");
@@ -1011,15 +1162,15 @@ void Task_Sensors(void *pvParameters) {
 
         // Codec8E AVL records always contain a GPS element. When the live fix
         // is lost, reuse only a genuinely known location and mark every GNSS
-        // field invalid/zero. If no location has ever been known, keep the TCP
-        // session alive but do not encode a fake (0, 0) position.
-        uint32_t heartbeatIntervalSec = accOn ? DEFAULT_INTERVAL_SEC : POWER_SAVE_INTERVAL_SEC;
+        // field invalid/zero. If no location has ever been known, do not encode
+        // a fake (0, 0) position.
+        uint32_t heartbeatIntervalMs = accOn ? DEFAULT_INTERVAL_SEC * 1000UL
+                                             : SAVE_SEND_INTERVAL_MS;
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            heartbeatIntervalSec = accOn ? state.intervalSec : POWER_SAVE_INTERVAL_SEC;
+            heartbeatIntervalMs = accOn ? state.intervalSec * 1000UL : SAVE_SEND_INTERVAL_MS;
             xSemaphoreGive(stateMutex);
         }
-        if (millis() - lastStatusHeartbeat >=
-                static_cast<uint64_t>(heartbeatIntervalSec) * 1000ULL) {
+        if (millis() - lastStatusHeartbeat >= heartbeatIntervalMs) {
             SystemState heartbeat;
             bool captured = false;
             bool hasLastKnownLocation = false;
@@ -1032,18 +1183,17 @@ void Task_Sensors(void *pvParameters) {
                 heartbeat.rssi = state.rssi;
                 heartbeat.temperature = state.temperature;
                 hasLastKnownLocation = state.hasLastKnownLocation;
-                captured = !state.gps.isValid || !accOn;
+                captured = !state.gps.gpsFixValid || !accOn;
                 xSemaphoreGive(stateMutex);
             }
 
-            if (captured && backlog.getRecordCount() == 0) {
+            if (captured && (!accOn || backlog.getRecordCount() == 0)) {
                 const time_t now = time(nullptr);
-                const bool hasHeartbeatTime = heartbeat.gps.utcTime >= 1000000000000ULL || now > 1000000000;
+                const bool hasHeartbeatTime = now > 1000000000;
                 if (hasLastKnownLocation && hasHeartbeatTime) {
-                    if (!accOn && now > 1000000000) {
-                        heartbeat.gps.utcTime = static_cast<uint64_t>(now) * 1000ULL;
-                    }
-                    heartbeat.gps.isValid = false;
+                    // Never reuse a stale GNSS timestamp for a status record.
+                    heartbeat.gps.utcTime = static_cast<uint64_t>(now) * 1000ULL;
+                    heartbeat.gps.gpsFixValid = false;
                     heartbeat.gps.satellites = 0;
                     heartbeat.gps.speed = 0.0f;
                     heartbeat.gps.course = 0.0f;
@@ -1051,24 +1201,29 @@ void Task_Sensors(void *pvParameters) {
                     heartbeat.gps.pdop = 0.0f;
                     heartbeat.gps.hdop = 0.0f;
                     if (backlog.pushRecord(heartbeat)) {
-                        Serial.printf("Status heartbeat queued: ts=%llu, lastKnown=%.7f,%.7f, GNSS=0\n",
-                                      static_cast<unsigned long long>(heartbeat.gps.utcTime),
-                                      heartbeat.gps.latitude, heartbeat.gps.longitude);
+                        if (!accOn) {
+                            Serial.printf("[SAVE] Heartbeat queued: now=%llu, lastKnown=%.7f,%.7f, "
+                                          "gpsFix=0, sats=0, reason=save_heartbeat\n",
+                                          static_cast<unsigned long long>(heartbeat.gps.utcTime),
+                                          heartbeat.gps.latitude, heartbeat.gps.longitude);
+                        } else {
+                            Serial.printf("Status heartbeat queued: ts=%llu, lastKnown=%.7f,%.7f, GNSS=0\n",
+                                          static_cast<unsigned long long>(heartbeat.gps.utcTime),
+                                          heartbeat.gps.latitude, heartbeat.gps.longitude);
+                        }
                         addWebLog("TX queue: status heartbeat (GNSS no fix)");
                     } else {
                         addWebLog("ERR: Status heartbeat queue failed");
                     }
                 } else {
-                    Serial.println("No GPS fix and no last known location, "
-                                   "sending status-only heartbeat if supported: "
-                                   "Codec8E AVL requires a GPS element, keeping TCP session alive instead");
-                    addWebLog("NOFIX: No last location; TCP heartbeat only");
+                    Serial.println("No GPS fix and no last known location; heartbeat not queued");
+                    addWebLog("NOFIX: No last location; heartbeat skipped");
                 }
             }
             lastStatusHeartbeat = millis();
         }
         
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(accOn ? 50 : 250));
     }
 }
 
@@ -1076,8 +1231,13 @@ void Task_Sensors(void *pvParameters) {
 // a long enrollment from delaying ACC/VBAT sampling and backlog scheduling.
 void Task_Fingerprint(void *pvParameters) {
     while (true) {
-        fingerprint.loop();
-        vTaskDelay(pdMS_TO_TICKS(20));
+        bool saveMode = false;
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            saveMode = !state.accState;
+            xSemaphoreGive(stateMutex);
+        }
+        fingerprint.loop(saveMode);
+        vTaskDelay(pdMS_TO_TICKS(saveMode ? 1000 : 20));
     }
 }
 
@@ -1090,7 +1250,7 @@ void Task_Indicators(void *pvParameters) {
             copyState.uploadingBacklog = state.uploadingBacklog;
             copyState.networkConnected = state.networkConnected;
             copyState.tcpConnected = state.tcpConnected;
-            copyState.gps.isValid = state.gps.isValid;
+            copyState.gps.gpsFixValid = state.gps.gpsFixValid;
             xSemaphoreGive(stateMutex);
         }
         indicators.update(copyState);
@@ -1169,18 +1329,44 @@ void loop() {
         }
     }
     
-    if (millis() - lastAliveLog > 5000) {
+    bool saveMode = false;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        saveMode = !state.accState;
+        xSemaphoreGive(stateMutex);
+    }
+    const uint32_t aliveInterval = saveMode ? SAVE_ALIVE_LOG_INTERVAL_MS : 10000UL;
+    if (millis() - lastAliveLog > aliveInterval) {
         uint32_t freeHeap = 0;
         bool net = false, tcp = false, gpsValid = false;
+        bool acc = false, physicalAcc = false, virtualAcc = false, usePhysicalAcc = true;
+        uint8_t satellites = 0;
+        uint8_t vbatPercent = 0;
+        float vbatVoltage = 0.0f, temperature = 0.0f;
+        int rssi = 0;
         if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             freeHeap = state.freeHeap;
             net = state.networkConnected;
             tcp = state.tcpConnected;
-            gpsValid = state.gps.isValid;
+            gpsValid = state.gps.gpsFixValid;
+            satellites = state.gps.satellites;
+            acc = state.accState;
+            physicalAcc = state.physicalAccState;
+            virtualAcc = state.virtualAccState;
+            usePhysicalAcc = state.usePhysicalAcc;
+            vbatVoltage = state.vbatVoltage;
+            vbatPercent = state.vbatPercent;
+            rssi = state.rssi;
+            temperature = state.temperature;
             xSemaphoreGive(stateMutex);
         }
-        Serial.printf("[SYSTEM] Alive. Heap: %u, Network: %d, TCP: %d, GPS Fix: %d\n", 
-                      freeHeap, net, tcp, gpsValid);
+        const uint32_t queued = backlog.getRecordCount();
+        Serial.printf("[SYSTEM] mode=%s io={acc:%d,phy:%d,virt:%d,src:%s} "
+                      "power={vbat:%.2fV,pct:%u%%} net={reg:%d,tcp:%d,rssi:%d} "
+                      "gps={fix:%d,sats:%u} backlog=%lu heap=%u temp=%.1fC\n",
+                      saveMode ? "SAVE" : "NORMAL", acc, physicalAcc, virtualAcc,
+                      usePhysicalAcc ? "PHY" : "VIRT", vbatVoltage, vbatPercent,
+                      net, tcp, rssi, gpsValid, satellites,
+                      static_cast<unsigned long>(queued), freeHeap, temperature);
         lastAliveLog = millis();
     }
     

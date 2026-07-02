@@ -247,14 +247,14 @@ bool BacklogManager::pushRecord(const SystemState& state) {
     rec.speed = state.gps.speed;
     rec.course = state.gps.course;
     rec.alt = state.gps.altitude;
-    rec.sats = state.gps.isValid ? state.gps.satellites : 0;
+    rec.sats = state.gps.gpsFixValid ? state.gps.satellites : 0;
     rec.pdop = state.gps.pdop;
     rec.hdop = state.gps.hdop;
     rec.utcTime = state.gps.utcTime;
     rec.vbatVoltage = state.vbatVoltage;
     rec.vbatPercent = state.vbatPercent;
     rec.accState = state.accState;
-    rec.isValid = state.gps.isValid;
+    rec.isValid = state.gps.gpsFixValid;
     rec.totalMileage = state.totalMileage;
     rec.rssi = state.rssi;
     rec.temperature = state.temperature;
@@ -311,7 +311,7 @@ std::vector<SystemState> BacklogManager::peekRecords(uint8_t count) {
         s.gps.pdop = rec.pdop;
         s.gps.hdop = rec.hdop;
         s.gps.utcTime = rec.utcTime;
-        s.gps.isValid = rec.isValid;
+        s.gps.gpsFixValid = rec.isValid;
         s.vbatVoltage = rec.vbatVoltage;
         s.vbatPercent = rec.vbatPercent;
         s.accState = rec.accState;

@@ -94,7 +94,7 @@ std::vector<uint8_t> Codec8E::buildAVLDataPacket(const std::vector<SystemState>&
         appendUint32(payload, latitude);
         appendUint16(payload, clampU16(record.gps.altitude));
         appendUint16(payload, clampU16(record.gps.course));
-        appendUint8(payload, record.gps.isValid ? record.gps.satellites : 0);
+        appendUint8(payload, record.gps.gpsFixValid ? record.gps.satellites : 0);
         appendUint16(payload, clampU16(record.gps.speed));
 
         // IO Elements (Event IO ID, N of Total IO)
@@ -110,7 +110,7 @@ std::vector<uint8_t> Codec8E::buildAVLDataPacket(const std::vector<SystemState>&
         ioElements.push_back({70, 2, (uint64_t)(int16_t)(record.temperature * 10)}); // Temperature (x10)
         ioElements.push_back({240, 1, gsmSignalLevel(record.rssi)}); // GSM signal 0..5
         ioElements.push_back({1, 1, record.accState ? 1ULL : 0ULL}); // DIN 1
-        ioElements.push_back({69, 1, record.gps.isValid ? 1ULL : 0ULL}); // GNSS status
+        ioElements.push_back({69, 1, record.gps.gpsFixValid ? 1ULL : 0ULL}); // GNSS status
         ioElements.push_back({179, 4, record.totalMileage}); // Total mileage
         ioElements.push_back({181, 2, (uint64_t)(record.gps.pdop * 10)}); // PDOP
         ioElements.push_back({182, 2, (uint64_t)(record.gps.hdop * 10)}); // HDOP

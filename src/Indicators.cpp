@@ -74,7 +74,7 @@ void Indicators::update(const SystemState& state) {
         // Xanh dương: Đang kết nối Server
         r = 0; g = 0; b = 50;
         shouldBlink = true;
-    } else if (!state.gps.isValid) {
+    } else if (!state.gps.gpsFixValid) {
         // Xanh dương nhạt nhấp nháy: Chưa có GPS
         r = 0; g = 10; b = 40;
         shouldBlink = true;
@@ -97,7 +97,7 @@ void Indicators::update(const SystemState& state) {
         digitalWrite(_ledPin, HIGH); // Force OFF
     } else {
         // Auto: Blink when GPS fix
-        if (state.gps.isValid) {
+        if (state.gps.gpsFixValid) {
             digitalWrite(_ledPin, _ledToggle ? LOW : HIGH);
         } else {
             digitalWrite(_ledPin, HIGH);
